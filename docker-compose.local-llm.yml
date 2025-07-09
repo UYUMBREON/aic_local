@@ -1,0 +1,315 @@
+version: '3.8'
+
+services:
+  # バックエンド
+  backend:
+    build: ./backend/fast_api
+    networks:
+      - internal
+    expose:
+      - 8000
+    volumes:
+      - ./backend/fast_api:/app
+      - ./backend/llm_containers/test_local_llm.py:/test_local_llm.py # 他コンテナとの通信動作の検証用プログラムをコンテナに設置
+    environment:
+      - PYTHONUNBUFFERED=1
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - no_proxy=vllm-ELYZA-japanese-Llama-2-7b-fast-instruct,vllm-Llama-3-ELYZA-JP-8B,vllm-Meta-Llama-3.1-8B-Instruct,vllm-Meta-Llama-3-8B-Instruct,vllm-Phi-3-small-8k-instruct,fastchat-tsuzumi7B-v1.2-api-server # 他のコンテナとプロキシを通さずに通信するために必須
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload --root-path /backend_api
+    # tokenizer用にGPUを確保
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            capabilities: [gpu]
+            device_ids: ['0']  # GPU(メモリ40GB)x4搭載ホストサーバ向け処理, 2つのモデルを1GPUで回している (GPU0: backend, tsuzumi)
+
+  # フロントエンド
+  frontend:
+    build: ./frontend
+    networks:
+      - internal
+    expose:
+      - 3000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: npm run dev
+
+  # Nginx
+  nginx:
+    build: ./nginx
+    ports:
+      - 80:80
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - public
+      - internal
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+
+  ######## ここから下は、local-llmサーバとなるコンテナ起動用 ########
+
+  # FastChat: tsuzumi7B-v1.2 (controller)
+  fastchat-tsuzumi7B-v1.2-controller:
+    build:
+      context: .
+      dockerfile: ./backend/llm_containers/tsuzumi7B-v1.2/Dockerfile
+      args:
+        - HTTP_PROXY=${HTTP_PROXY}  # tsuzumiのsampleを踏襲、未設定でも動作する
+        - HTTPS_PROXY=${HTTPS_PROXY}  # tsuzumiのsampleを踏襲、未設定でも動作する
+        - no_proxy=localhost,127.0.0.1,fastchat-tsuzumi7B-v1.2-controller,fastchat-tsuzumi7B-v1.2-api-server,fastchat-tsuzumi7B-v1.2-model-worker1  # tsuzumiのsampleを踏襲、たぶん未設定でも動作する
+        - fastchat_dir=./backend/llm_containers/tsuzumi7B-v1.2/FastChat
+        - tsuzumi_dir=./backend/llm_containers/tsuzumi7B-v1.2
+    image: ntt-llm_api:20240930
+    container_name: fastchat-tsuzumi7B-v1.2-controller
+    restart: always
+    volumes:
+      - ${LOG_DIR}:/FastChat/logs
+    env_file:
+      - ./.env
+    command: >
+      python3 -m fastchat.serve.controller
+        --host 0.0.0.0
+        --port 40000
+    environment:
+      - LOGDIR=./logs
+      - no_proxy=localhost,127.0.0.1,fastchat-tsuzumi7B-v1.2-controller,fastchat-tsuzumi7B-v1.2-api-server,fastchat-tsuzumi7B-v1.2-model-worker1
+    expose:
+      - 40000
+    networks:
+      - internal
+
+  # FastChat: tsuzumi7B-v1.2 (server)
+  fastchat-tsuzumi7B-v1.2-api-server:
+    image: ntt-llm_api:20240930
+    container_name: fastchat-tsuzumi7B-v1.2-api-server
+    restart: always
+    volumes:
+      - ${LOG_DIR}:/FastChat/logs
+    env_file:
+      - ./.env
+    depends_on:
+      - fastchat-tsuzumi7B-v1.2-model-worker1
+    command: >
+      python3 -m fastchat.serve.openai_api_server
+        --host 0.0.0.0
+        --port 30000
+        --controller-address http://fastchat-tsuzumi7B-v1.2-controller:40000
+        --api-keys "${APP_API_KEYS:-}"
+    environment:
+      - LOGDIR=./logs
+      - no_proxy=localhost,127.0.0.1,fastchat-tsuzumi7B-v1.2-controller,fastchat-tsuzumi7B-v1.2-api-server,fastchat-tsuzumi7B-v1.2-model-worker1
+    expose:
+      - 30000
+    networks:
+      - internal
+
+  # FastChat: tsuzumi7B-v1.2 (model-worker)
+  fastchat-tsuzumi7B-v1.2-model-worker1:
+    image: ntt-llm_api:20240930
+    container_name: fastchat-tsuzumi7B-v1.2-model-worker1
+    restart: always
+    env_file:
+      - ./.env
+    volumes:
+      - /usr/local/share/local-llm/20241001_tsuzumi7B-v1.2/models:/model  # ホストサーバのLLM保存先をコンテナに接続
+      - ./backend/llm_containers/tsuzumi7B-v1.2/FastChat/fastchat:/FastChat/fastchat
+      - ${LOG_DIR}:/FastChat/logs
+    command: >
+      python3 -m fastchat.serve.model_worker
+        --model-name ${WORKER1_MODEL_NAME}
+        --model-path ${WORKER1_MODEL_PATH}
+        --dtype ${WORKER1_DTYPE}
+        --attn-impl ${WORKER1_ATTN_IMPL}
+        --controller-address http://fastchat-tsuzumi7B-v1.2-controller:40000
+        --worker-address http://fastchat-tsuzumi7B-v1.2-model-worker1:40001
+        --host 0.0.0.0
+        --port 40001
+    depends_on:
+      - fastchat-tsuzumi7B-v1.2-controller
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${WORKER1_GPU_IDS}
+      - WORKER_MODEL_TYPE=${WORKER1_MODEL_TYPE}
+      - WORKER_SYSTEM_PROMPT=${WORKER1_SYSTEM_PROMPT}
+      - LOGDIR=./logs
+      - PYTHONPATH=${WORKER1_MODEL_PATH}
+      - no_proxy=localhost,127.0.0.1,fastchat-tsuzumi7B-v1.2-controller,fastchat-tsuzumi7B-v1.2-api-server,fastchat-tsuzumi7B-v1.2-model-worker1
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            capabilities: [gpu]
+            device_ids: ['0']  # GPU(メモリ40GB)x4搭載ホストサーバ向け処理, 2つのモデルを1GPUで回している (GPU0: backend, tsuzumi)
+    expose:
+      - 40001
+    networks:
+      - internal
+
+  # vLLM1: ELYZA-japanese-Llama-2-7b-fast-instruct
+  vLLM-ELYZA-japanese-Llama-2-7b-fast-instruct:
+    image: vllm/vllm-openai:latest
+    container_name: vllm-ELYZA-japanese-Llama-2-7b-fast-instruct
+    restart: always  # GPUメモリ不足の環境で起動する場合、alwaysで設定していると何度も再起動し続けるので注意
+    volumes:
+      - ./.cache/huggingface:/root/.cache/huggingface
+      - /usr/local/share/local-llm/elyza/ELYZA-japanese-Llama-2-7b-fast-instruct:/ELYZA-japanese-Llama-2-7b-fast-instruct  # ホストサーバのLLM保存先をコンテナに接続
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN}
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            capabilities: [gpu]
+            device_ids: ['1']  # GPU(メモリ40GB)x4搭載ホストサーバ向け処理, 2つのモデルを1GPUで回している (GPU1: elyza-llama2, llama3-elyza)
+    # --model: ホストサーバのLLM保存先をコンテナに接続し、そのディレクトリから起動
+    # --gpu-memory-utilization: 1GPUに2LLMを載せるため0.4に設定
+    # --max-model-len: 未設定でも動くが、他のLLMと条件を揃えるため4096に設定
+    command: >
+      --model /ELYZA-japanese-Llama-2-7b-fast-instruct
+      --served-model-name ELYZA-japanese-Llama-2-7b-fast-instruct
+      --dtype auto
+      --gpu-memory-utilization 0.4
+      --max-model-len 4096
+    expose:
+      - 8000
+    networks:
+      - internal
+
+  # vLLM2: Llama-3-ELYZA-JP-8B
+  vLLM-Llama-3-ELYZA-JP-8B:
+    image: vllm/vllm-openai:latest
+    container_name: vllm-Llama-3-ELYZA-JP-8B
+    restart: always  # GPUメモリ不足の環境で起動する場合、alwaysで設定していると何度も再起動し続けるので注意
+    volumes:
+      - ./.cache/huggingface:/root/.cache/huggingface
+      - /usr/local/share/local-llm/elyza/Llama-3-ELYZA-JP-8B:/Llama-3-ELYZA-JP-8B
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN}
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            capabilities: [gpu]
+            device_ids: ['1']  # GPU(メモリ40GB)x4搭載ホストサーバ向け処理, 2つのモデルを1GPUで回している (GPU1: elyza-llama2, llama3-elyza)
+    # --model: ホストサーバのLLM保存先をコンテナに接続し、そのディレクトリから起動
+    # --gpu-memory-utilization: 1GPUに2LLMを載せるため0.4に設定
+    # --max-model-len: 未設定でも動くが、他のLLMと条件を揃えるため4096に設定
+    command: >
+      --model /Llama-3-ELYZA-JP-8B
+      --served-model-name Llama-3-ELYZA-JP-8B
+      --dtype auto
+      --gpu-memory-utilization 0.4
+      --max-model-len 4096
+    expose:
+      - 8000
+    networks:
+      - internal
+
+  # vLLM3: Meta-Llama-3.1-8B-Instruct
+  vLLM-Meta-Llama-3.1-8B-Instruct:
+    image: vllm/vllm-openai:latest
+    container_name: vllm-Meta-Llama-3.1-8B-Instruct
+    restart: always  # GPUメモリ不足の環境で起動する場合、alwaysで設定していると何度も再起動し続けるので注意
+    volumes:
+      - ./.cache/huggingface:/root/.cache/huggingface
+      - /usr/local/share/local-llm/meta-llama/Meta-Llama-3.1-8B-Instruct:/Meta-Llama-3.1-8B-Instruct  # ホストサーバのLLM保存先をコンテナに接続
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN}
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            capabilities: [gpu]
+            device_ids: ['2']  # GPU(メモリ40GB)x4搭載ホストサーバ向け処理, 2つのモデルを1GPUで回している (GPU2: llama-3.1, llama-3)
+    # --model: ホストサーバのLLM保存先をコンテナに接続し、そのディレクトリから起動
+    # --gpu-memory-utilization: 1GPUに2LLMを載せるため0.4に設定
+    # --max-model-len: 4096程度より大きい or 未設定だとCUDA OOMで落ちる可能性が高い
+    command: >
+      --model /Meta-Llama-3.1-8B-Instruct
+      --served-model-name Meta-Llama-3.1-8B-Instruct
+      --dtype auto
+      --gpu-memory-utilization 0.4
+      --max-model-len 4096
+    expose:
+      - 8000
+    networks:
+      - internal
+
+  # vLLM4: Meta-Llama-3-8B-Instruct
+  vLLM-Meta-Llama-3-8B-Instruct:
+    image: vllm/vllm-openai:latest
+    container_name: vllm-Meta-Llama-3-8B-Instruct
+    restart: always  # GPUメモリ不足の環境で起動する場合、alwaysで設定していると何度も再起動し続けるので注意
+    volumes:
+      - ./.cache/huggingface:/root/.cache/huggingface
+      - /usr/local/share/local-llm/meta-llama/Meta-Llama-3-8B-Instruct:/Meta-Llama-3-8B-Instruct  # ホストサーバのLLM保存先をコンテナに接続
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN}
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            capabilities: [gpu]
+            device_ids: ['2']  # GPU(メモリ40GB)x4搭載ホストサーバ向け処理, 2つのモデルを1GPUで回している (GPU2: llama-3.1, llama-3)
+    # --model: ホストサーバのLLM保存先をコンテナに接続し、そのディレクトリから起動
+    # --gpu-memory-utilization: 1GPUに2LLMを載せるため0.4に設定
+    # --max-model-len: 4096程度より大きい or 未設定だとCUDA OOMで落ちる可能性が高い
+    command: >
+      --model /Meta-Llama-3-8B-Instruct
+      --served-model-name Meta-Llama-3-8B-Instruct
+      --dtype auto
+      --gpu-memory-utilization 0.4
+      --max-model-len 4096
+    expose:
+      - 8000
+    networks:
+      - internal
+
+  # vLLM5: Phi-3-small-8k-instruct
+  vLLM-Phi-3-small-8k-instruct:
+    image: vllm/vllm-openai:latest
+    container_name: vllm-Phi-3-small-8k-instruct
+    restart: always  # GPUメモリ不足の環境で起動する場合、alwaysで設定していると何度も再起動し続けるので注意
+    volumes:
+      - ./.cache/huggingface:/root/.cache/huggingface
+      - /usr/local/share/local-llm/microsoft/Phi-3-small-8k-instruct:/Phi-3-small-8k-instruct  # ホストサーバのLLM保存先をコンテナに接続
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN}
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            capabilities: [gpu]
+            device_ids: ['3']  # GPU(メモリ40GB)x4搭載ホストサーバ向け処理, 2つのモデルを1GPUで回している (GPU3: phi3)
+    # --model: ホストサーバのLLM保存先をコンテナに接続し、そのディレクトリから起動
+    # --trust-remote-code: Phi3ではhuggingfaceからダウンロード時に内部プログラムを自動実行するため必須
+    # --gpu-memory-utilization: GPU3はPhi3占有だが他のLLMと条件を揃えるため0.4に設定
+    # --max-model-len: 未設定でも動くが、他のLLMと条件を揃えるため4096に設定
+    command: >
+      --model /Phi-3-small-8k-instruct
+      --served-model-name Phi-3-small-8k-instruct
+      --dtype auto
+      --trust-remote-code
+      --gpu-memory-utilization 0.4
+      --max-model-len 4096
+    expose:
+      - 8000
+    networks:
+      - internal
+
+# ネットワーク設定
+networks:
+  public:
+    driver: bridge  # 外部との通信可能なネットワーク
+  internal:
+    driver: bridge  # 内部専用ネットワーク (外部からアクセス不可)

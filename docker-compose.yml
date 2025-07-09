@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  # バックエンド
+  backend:
+    build: ./backend/fast_api
+    networks:
+      - internal
+    expose:
+      - 8000
+    volumes:
+      - ./backend/fast_api:/app
+    environment:
+      - PYTHONUNBUFFERED=1
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload --root-path /backend_api
+
+  # フロントエンド
+  frontend:
+    build: ./frontend
+    networks:
+      - internal  # Nginx経由でのみアクセス可
+    expose:
+      - 3000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: npm run dev
+
+  # Nginx
+  nginx:
+    build: ./nginx
+    ports:
+      - 80:80
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - public
+      - internal
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+
+# ネットワーク設定
+networks:
+  public:
+    driver: bridge  # 外部との通信可能なネットワーク
+  internal:
+    driver: bridge  # 内部専用ネットワーク (外部からアクセス不可)

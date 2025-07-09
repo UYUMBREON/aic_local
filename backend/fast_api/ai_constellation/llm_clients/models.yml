@@ -1,0 +1,29 @@
+OpenAI:
+  version: gpt-4o-2024-05-13
+  api_key: '${OPENAI_API_KEY}'
+
+ELYZA-2:
+  version: ELYZA-japanese-Llama-2-7b-fast-instruct
+  base_url: 'http://vLLM-ELYZA-japanese-Llama-2-7b-fast-instruct:8000/v1'
+
+ELYZA-3:
+  version: Llama-3-ELYZA-JP-8B
+  base_url: 'http://vLLM-Llama-3-ELYZA-JP-8B:8000/v1'
+
+Meta-3.1:
+  version: Meta-Llama-3.1-8B-Instruct
+  base_url: 'http://vLLM-Meta-Llama-3.1-8B-Instruct:8000/v1'
+
+Meta-3:
+  version: Meta-Llama-3-8B-Instruct
+  base_url: 'http://vLLM-Meta-Llama-3-8B-Instruct:8000/v1'
+
+Phi-3:
+  version: Phi-3-small-8k-instruct
+  base_url: 'http://vLLM-Phi-3-small-8k-instruct:8000/v1'
+
+tsuzumi-1.2:
+  version: tsuzumi-7b-v1_2-8k-instruct
+  base_url: 'http://fastchat-tsuzumi7B-v1.2-api-server:30000/v1'
+  default_headers:
+    Authorization: 'Bearer 8859b0cb'

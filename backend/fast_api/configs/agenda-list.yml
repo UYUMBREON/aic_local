@@ -1,0 +1,11 @@
+- id: 1
+  ja: カーリング用のブラシは家の床掃除に使えるか？
+  en: Are the brooms from curling good for using on house floors?
+  display:
+    ja: Q1：カーリング用のブラシは床の掃除に使えるか？
+    en: Q1：Are the brooms from curling good for using on house floors?
+- id: 2
+  ja: 議題は「大牟田市における介護予防の方法のアイデア出し」です。それぞれの立場で2つずつアイデアを出し、その理由を合わせて説明してください。
+  en: |-
+    On the agenda is "ideas for ways to prevent caregiving in Omuta City."
+    Each person should come up with two ideas from their own perspective and explain the reasons for their ideas together.

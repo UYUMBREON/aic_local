@@ -1,0 +1,8 @@
+# Tsuzumi 1.0.2動作用ライブラリ
+
+composer==0.22.0
+einops==0.8.0
+omegaconf==2.3.0
+catalogue==2.0.10
+# バージョン変更抑止
+torch==2.3.0
